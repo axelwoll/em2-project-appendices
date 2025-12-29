@@ -1,0 +1,888 @@
+---
+title: "Data analysis Part 2"
+author: "Andreas Akselvoll"
+date: "2025-11-19"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+# Load all packages from the library (NOTE: the list of required packages is defined in "Preprocessing and descriptive plots.Rmd"!)
+lapply(required_packages, library, character.only = TRUE)
+```
+
+# Modelling Base Rate Neglect
+
+In this R-markdown file, we briefly explain the modelling procedure that was used to fit a weighted Bayesian model to each participant's data to yield both individual and group level prior- and likelihood-weights. In the sections that follow, the actual modelling is carried out, and finally, model predictions are plotted against experimental data.
+
+## Model-based measures of base rate neglect; an explanation of the modelling procedure
+
+In accordance with the methodological procedure used by Ashinoff et al., we employed a weighted Bayesian model so as to provide us with a model-based measure of base rate neglect, as well as specific hypotheses about how base rate neglect would be reflected in participants’ probability estimates. Essentially, the model is recursive belief updating rule based on a weighted variant of Bayes’ theorem in log-odds (‘logit’) space, which has the following, general form:
+
+$$
+logit(posterior)_d =\omega_1 \cdot logit(prior)_d + \omega_2 \cdot logit(likelihood)_d
+$$
+
+The subscript $d$ refers to the bead draw with which the prior, likelihood and posterior terms are associated. That is, the prior term represents the probability that the green or blue box was chosen as the Hidden Box, immediately before the $d$’th bead in the sequence is drawn. The likelihood term represents the probability of drawing a bead of the same color as bead $d$, given the hypothesis about the hidden box being blue or green. Finally, the posterior term represents the updated probability of the hypothesis concerning the Hidden Box, after the $d$’th bead draw. As an illustrative example, suppose H: Hidden Box = Blue Box; if the $d$'th draw is a blue bead, the posterior probability of H after the $d$'th draw would be greater than the prior probability before that bead was drawn. Conversely, a green bead would have decreased the probability assigned to H.
+
+Provided with a specific sequence of beads, an initial (arbitrary) prior term, and values for the prior- and likelihood weights, $\omega_1$ and $\omega_2$, the model can be used to simulate the belief trajectory of a Bayesian observer for that specific sequence of beads by recursively defining $logit(prior)_{d+1}=logit(posterior)_d$. Importantly, a Bayesian observer with base rate neglect would be modelled by having $\omega_1 < 1$, since prior underweighting implies the sort of temporal discounting of older evidence (bead) samples, which is thought to be characteristic of base-rate neglect.
+
+We've fitted four variants of this general model to each participant’s data by means of a number of functions defined in this R-Markdown script. How the parameters associated with each of the four models are found, once the modelling procedure has been carried out, is explained in the subsection ***Model Comparisons*** further down.
+
+Central to the fitting procedure is R's *optim* function [R 2025.09.2 (R Core Team, 2025)], which (in crude terms) served to estimate the values of $\omega_1$ and $\omega_2$ which minimized the Rooted Mean Squared Error (RMSE) between model predictions and a participant’s probability estimates, i.e. the parameters resulting in the best fit. This procedure was applied to each trial of each participant, such that participant-level parameters were obtained by averaging the estimated parameters ($\omega_1$ and $\omega_2$) associated with a specific subset of trials, which depended on the model being fitted (how this is achieved, is elaborated in ***Model Comparisons***). In total, this procedure yields the data frame 'modelling_results' loaded further down in the script, which holds the fitted parameters for each trial of each participant.
+
+The four models (defined by the number of free parameters in them) were compared by computing their respective mean BIC (Bayesian Information Criterion) values across participants, using the formula,
+
+$$
+BIC= n \cdot \ln(SSE/n) +l \cdot \ln(n)
+$$
+
+which takes into account how well predicted estimates elicited by the model fit a participant's actual probability estimates (captured in the SSE (Sum of Squared Errors) term) while also penalizing models with many parameters (the $l$ term). For more details on BIC, see Ashinoff et al. 2022.
+
+The model referred to as *M12*: (1 $\omega_1$ , 2 $\omega_2$; one prior-weight for all conditions, and two likelihood weights, $\omega_{2(60)}$ and $\omega_{2(90)}$, one for each Ratio condition, see ***Model Comparisons***) came out with the lowest mean BIC value, and was thus considered the best group-level model. Group-level parameters were then obtained by averaging the estimated $\omega_1$, $\omega_{2(60)}$ and $\omega_{2(90)}$ across participants. Doing so we got the following group-level parameters:
+
+-   $\omega_1\approx1.04$
+
+-   $\omega_{2(60)}\approx0.62$
+
+-   $\omega_{2(90)}\approx0.28$
+
+We interpret the value of these parameters in the main experiment report.
+
+## Defining the basic fitting function
+
+The code blocks contained in this part of the script, are used to define the basic function for fitting the weighted Bayesian model to a particular trial. The following functions are defined:
+
+1.  **logit**: convert probability to logit
+2.  **inv_logit**: convert logit to probability
+3.  **compute_likelihood_logit**: compute likelihood logit for bead color (majority_color refers to the color of the chosen/hidden box)
+4.  **simulate_beliefs**: simulates belief updating for a particular trial given: the sequence of beads, the chosen box (blue or green), the bead ratio, and prior-/likelihood-weights (omega1 and omega2) returns a vector containing 9 predicted probabilities for the true box (the first always being the participant's prior)
+5.  **objective_fn**: takes the same input as simulate_beliefs (since that function is used in objective_fn), but additionally takes a vector representing the actual probability estimates for that trial, and computes the RMSE.
+6.  **fit_model**: given relevant trial information, returns the prior and likelihood weights that minimized the RMSE (i.e. fitted to the data) between predicted estimates and observed estimate
+
+```{r}
+# -------------------------------
+# helper functions
+# -------------------------------
+
+# logit: convert probability to logit
+
+logit <- function(p, eps = 1e-6) {
+  p <- pmin(pmax(p, eps), 1 - eps)  # Clamp p to [eps, 1 - eps]
+  return(log(p / (1 - p)))
+}
+
+
+# inv_logit: convert logit to probability
+inv_logit <- function(x) 1 / (1 + exp(-x))
+
+
+# compute_likelihood_logit: Compute likelihood logit for bead color (majority_color refers to the color of the chosen/hidden box)
+compute_likelihood_logit <- function(bead_color, majority_color, bead_ratio) {
+  # bead_ratio is like c(majority = 0.6, minority = 0.4)
+  if (bead_color == majority_color) {
+    return(logit(unname(bead_ratio["majority"])))
+  } else {
+    return(logit(unname(bead_ratio["minority"])))
+  }
+}
+
+# Example: suppose the bead ratio is 60:40, and the hidden box is the blue box, such that it contains 60 blue, 40 green. Then the likelihood P(blue bead | blue box) = 0.6
+
+```
+
+```{r}
+# -------------------------------
+# simulate belief trajectory
+# -------------------------------
+
+# simulate_beliefs:  simulates belief updating for a particular trial given: the sequence of beads, the chosen box (blue or green), the bead ratio, and prior-/likelihood-weights (omega1 and omega2) returns a vector containing 9 predicted probabilities for the true box (the first always being the participant's prior)
+
+simulate_beliefs <- function(beads, majority_color, bead_ratio, subject_prior, omega1, omega2) {
+  n <- length(beads)
+  beliefs <- numeric(n+1) # The list which we'll put the predictions into
+  beliefs[1] <- subject_prior  # First belief prediction is the prior of the subject
+  logit_prior <- logit(subject_prior)   
+  
+  # Determine the minority color
+  minority_color <- if (majority_color == 'blue') 'green' else 'blue'
+  
+  # Iterate over each bead draw (d representing bead draw no.)
+  for (d in 1:n) {
+    # Determine the bead color
+    d_color <- if(beads[d] == 1) majority_color else minority_color
+    
+    # Compute the likelihood P([color] bead | [color] box) (in logit terms)
+    likelihood_logit <- compute_likelihood_logit(bead_color = d_color, majority_color, bead_ratio)
+    
+    # Compute the logit posterior using the weights
+    logit_post <- omega1 * logit_prior + omega2 * likelihood_logit
+    
+    # Convert the logit posterior to probability, add to the vector containing predictions
+    beliefs[d + 1] <- inv_logit(logit_post)
+    
+    # Set the prior for the next bead draw (d+1) to the posterior calculated from the current bead draw
+    logit_prior <- logit_post
+  }
+  return(beliefs)
+}
+
+```
+
+```{r}
+# -------------------------------
+# objective function for fitting
+# -------------------------------
+
+# objective_fn: takes the same input as simulate_beliefs (since that function is used in objective_fn), but additionally takes a vector representing the actual probability estimates for that trial, and computes the RMSE.
+objective_fn <- function(params, beads, majority_color, bead_ratio, observed) {
+  omega1 <- params[1]
+  omega2 <- params[2]
+  predicted <- simulate_beliefs(beads, majority_color, bead_ratio, observed[1], omega1, omega2)
+  # Exclude first prior (0.5) if observed starts after first bead
+  rmse <- sqrt(mean((predicted[2:9] - observed[2:9])^2)) # Fit using estimates after bead draws (i.e. the prior is excluded)
+  return(rmse)
+}
+
+```
+
+```{r}
+# -------------------------------
+# fitting function
+# -------------------------------
+
+# fit_model: given relevant trial information, returns the prior and likelihood weights that minimized the RMSE (i.e. fitted to the data) between predicted estimates and observed estimates.
+fit_model <- function(beads, majority_color, bead_ratio, observed) {
+  best_params <- c()
+  
+  # Fit the model a hundred times to the trial, then pick the parameters associated with the fit having the lowest RMSE
+  for (x in 1:100) {
+    prior_weight <- runif(n=1, min=0, max=20)
+    likelihood_weight <- runif(n=1, min=0, max=20)
+    
+    start_params <- c(omega1 = prior_weight, omega2 = likelihood_weight)
+    fit_x <- optim(
+      par = start_params,
+      fn = objective_fn,
+      beads = beads,
+      majority_color = majority_color,
+      bead_ratio = bead_ratio,
+      observed = observed,
+      method = "L-BFGS-B",
+      lower = c(0, 0), upper = c(20, 20)
+    )
+    params <- fit_x$par
+    rmse <- fit_x$value
+    
+    if (length(best_params) == 0) {
+      best_params <- c(params,rmse)
+    } else if (rmse < best_params[3]) {
+      best_params <- c(params,rmse)
+    }
+    
+  }
+  
+  # Extract best parameters
+  min_params <- c(omega1 = best_params[1], omega2 = best_params[2], rmse = best_params[3])
+  
+  #return(data.frame(omega1s,omega2s,rmses))
+  return(best_params)
+}
+
+```
+
+## Estimation of prior/likelihood weights for each participant
+
+In the following, we define functions that (1) fit the model **to each trial separately** (with multiple random starts) to get the best-fitting parameters for that trial, and (2) **aggregate across trials for each participant** to get participant-level parameter estimates.
+
+```{r}
+# fitToTrial: when given a participant's dataframe and a trial number, fits the model to the data from that trial (essentially no different from fit_model, but takes input in the form of a the subset of the data_normalized dataframe corresponding to said participant's data)
+
+fitToTrial <- function(subject_df, trial_number) {
+  trial_x_data <- subject_df %>% filter(Trial == trial_number)
+  
+  # Extract the information from trial x, which will serve as input to the fit_model function
+  tx_sequence_str <- trial_x_data$Sequence[1] 
+  tx_beads <- as.numeric(unlist(strsplit(tx_sequence_str, ",")))
+  tx_hidden_color <- trial_x_data$HiddenColor[1]
+  tx_observed <- trial_x_data$ProbEstimate
+  tx_ratio_val <- trial_x_data$Ratio[1]
+  tx_bead_ratio <- if (tx_ratio_val == 60) c(majority = 0.6, minority = 0.4) else c(majority = 0.9, minority = 0.1)
+  
+  # Fit the chosen model (in this case M11)
+  tx_params <- fit_model(
+    beads = tx_beads, 
+    majority_color = tx_hidden_color, 
+    bead_ratio = tx_bead_ratio, 
+    observed = tx_observed
+    )
+  
+  return(tx_params)
+}
+
+```
+
+```{r}
+# fitToParticipant: takes only a subject_id as input, and fits the weighted Bayesian model to each of the 64 trials in turn. Returns a dataframe with trial info and the fitted parameters for each trial.
+
+fitToParticipant <- function(subject_id) {
+  subject_x_data <- data_normalized %>% 
+    filter(Subject == subject_id, Accuracy == 1)
+  
+  # The trials to loop over + create a column which labels each trial with its condition (60:40 or 90:10)
+  # Create a trial-level lookup table
+  trial_info <- subject_x_data %>%
+    distinct(Trial, Ratio, Display)
+
+  trials <- trial_info$Trial
+  subject_column <- rep(subject_x_data$Subject[1], length(trials))
+  
+  
+  params_mat <- sapply(trials, function(trial_no) {
+    fitToTrial(subject_df = subject_x_data, trial_number = trial_no)
+  })
+  
+  omega1s <- params_mat[1, ]
+  omega2s <- params_mat[2, ]
+  rmses   <- params_mat[3, ]
+  
+  # The dataframe returned by the function holds all the information necessary to 'extract' the parameters associated 
+  df <- data.frame(
+    Subject = subject_column,
+    Trial = trials, 
+    Ratio = trial_info$Ratio, 
+    Display = trial_info$Display, 
+    omega1 = omega1s, 
+    omega2 = omega2s, 
+    RMSE = rmses
+    )
+  
+  return(df)
+}
+```
+
+```{r eval=FALSE, include=FALSE}
+# OBS: this code block calls fitToParticipant on every participant, doing so in parallel, processing 5 participants at a time. The results of this fitting procedure (which takes about 7 minutes) has been saved to "modelling_results.csv", and stored in the same R-project as this R-markdown file. "modelling_results.csv" is loaded in the subsequent code block, which is why the code in this block has been deactivated.
+
+# Cores at R's disposal for the parallel processing
+# n_cores <- detectCores() - 3
+# 
+# subject_ids <- unique(data_normalized$Subject)
+# 
+# logfile <- "progress_log.txt"
+# 
+# # Run in parallel using mclapply
+# modelling_results_list <- mclapply(X = seq_along(subject_ids), FUN = function(i) {
+#   sub_id <- subject_ids[i]
+#   
+#   cat(sprintf("[%s] Starting %d/%d — %s\n",
+#               Sys.time(), i, length(subject_ids), sub_id),
+#       file = logfile, append = TRUE)
+#   
+#   subject_df <- data_normalized %>% filter(Subject == sub_id, Accuracy == 1)
+#   
+#   trials <- subject_df %>% distinct(Trial, Ratio, Display)
+#   
+#   params_mat <- sapply(trials$Trial, function(trial_no) {
+#     fitToTrial(subject_df = subject_df, trial_number = trial_no)
+#   })
+#   
+#   cat(sprintf("[%s] Finished %d/%d — %s\n",
+#               Sys.time(), i, length(subject_ids), sub_id),
+#       file = logfile, append = TRUE)
+#   
+#   data.frame(
+#     Subject = rep(sub_id, nrow(trials)),
+#     Trial = trials$Trial,
+#     Ratio = trials$Ratio,
+#     Display = trials$Display,
+#     omega1 = params_mat[1, ],
+#     omega2 = params_mat[2, ],
+#     RMSE = params_mat[3, ]
+#   )
+#   
+# }, mc.cores = n_cores)
+# 
+# modelling_results <- do.call(rbind, modelling_results_list)
+# 
+# write.csv(modelling_results, "./modelling_results.csv", row.names = FALSE)
+```
+
+```{r}
+# load the the modelling results from 'modelling_results.csv'
+modelling_results <- read.delim(file = "./modelling_results.csv", sep = ',')
+```
+
+```{r}
+# visualize the distributions of omega1, omega2_60 and omega2_90 from the modelling_results dataframe (we are interested in averaging each parameter across participants, and upon seeing the distribution of omega1s, very few (relatively speaking) observations are around a value of 20, that we think it warrants filtering them out)
+filtered_modelling_results <- modelling_results %>% filter(omega1 < 2 & omega2 < 2)
+
+p_omega1_distribution <- ggplot(filtered_modelling_results, aes(x = omega1)) +
+  geom_histogram(aes(y = (..count..)/sum(..count..)), bins = 50, color = "black", fill = "green", alpha = 0.7, ) +
+  labs(
+    x = expression(omega[1]),  # Greek letter omega with subscript 1
+    y = "Relative Frequency",  # Y-axis label changed to relative frequency
+    title = "Distribution of estimated prior weights across participants"  # Title of the plot
+  ) +
+  theme_minimal()
+
+
+p_omega2_distribution <- ggplot(modelling_results, aes(x = omega2, fill = factor(Ratio))) + 
+  geom_histogram(aes(y = (..count..)/sum(..count..)), bins = 50, color = "black", alpha = 0.7) +
+  scale_fill_manual(values = c("blue", "red")) +
+  labs(
+    x = expression(omega[2]),  # Greek letter omega with subscript 2
+    y = "Relative Frequency",  # Y-axis label changed to relative frequency
+    title = "Distributions of estimated likelihood weights across participants",  # Title of the plot
+    fill = "Ratio"  # Update legend title
+  ) +
+  theme_minimal()
+
+mean(filtered_modelling_results$omega1)
+mean(filtered_modelling_results$omega2[filtered_modelling_results$Ratio == 60])
+mean(filtered_modelling_results$omega2[filtered_modelling_results$Ratio == 90])
+
+# View the plots
+p_omega1_distribution
+p_omega2_distribution
+
+
+
+```
+
+```{r}
+# Save relevant plots from above as PNG's
+ggsave(
+  filename = here("figs", "omega1_distribution.png"),
+  p_omega1_distribution,
+  width = 6,
+  height = 4,
+  dpi = 300,
+  units = "in",
+  bg = "white"
+)
+
+ggsave(
+  filename = here("figs", "omega2_distribution.png"),
+  p_omega2_distribution,
+  width = 6,
+  height = 4,
+  dpi = 300,
+  units = "in",
+  bg = "white"
+)
+
+
+```
+
+## Model Comparisons
+
+In this part of the R-Markdown file, we compare four different models:
+
+-   M11: 1 $\omega_1$ , 1 $\omega_2$ (one prior- and likelihood weight for all conditions; 2 free parameters)
+
+-   M12: 1 $\omega_1$ , 2 $\omega_2$ (one prior-weight for all conditions, and two likelihood weights, $\omega_{2(60)}$ and $\omega_{2(90)}$, one for each Ratio condition; 3 free parameters)
+
+-   M22: 2 $\omega_1$ , 2 $\omega_2$ (two prior-weights, $\omega_{1(visual)}$ and $\omega_{1(percentage)}$, one for each Display condition and two likelihood weights, $\omega_{2(60)}$ and $\omega_{2(90)}$, one for each Ratio condition; 4 free parameters)
+
+-   M24: 2 $\omega_1$ , 4 $\omega_2$ (two prior-weights, $\omega_{1(visual)}$ and $\omega_{1(percentage)}$, one for each Display condition and four likelihood weights, $\omega_{2(60,visual)}$, $\omega_{2(60,percentage)}$,$\omega_{2(90,visual)}$ and $\omega_{2(90,percentage)}$, one for each Ratio x Percentage condition; 6 free parameters)
+
+To obtain the model predictions elicited by one of the models above, for a specific participant, we take the subset of the *modelling_results* data frame corresponding to said participant, and average subsets of the omega1 and omega2 column to obtain model parameters, according to the model that was chosen. For instance in obtaining parameters for the M12 model, we average the entire omega1 column for a given participant, average the part of the omega2 column corresponding to the Ratio = 60 to obtain $\omega_{2(60)}$ and the part of the same column corresponding Ratio = 90 to obtain $\omega_{2(90)}$.
+
+The estimated omega1 and omega2(s) for a given participant supposedly represents the 'actual model that they use' in the sense, that while omega1 and omega2 varies across the participant's trials, this can be assumed to be the result of the omega1 and omega2s being drawn from **normal distributions**.
+
+We apply all four models to all the participant's trials, i.e. for each bead sequence have each model predict the probability estimates for each draw, then compute the **Squared Error** (difference between predictions and estimate), and after applying it to all their trials, compute the **Sum of Squared Error (SSE).**
+
+Having the **SSE** associated with the particular model and particular participant, we then enter this into a calculation of the **BIC**-value for the model for that participant. This is done for the four models listed above.
+
+Finally, we compute the **mean BIC value** for each model, and compare models by mean BIC values.
+
+```{r}
+# Define a function with takes subject_id and their estimated omega1 and omega2(s) (the number of omega2s depends on the model) and returns the SSE 
+compute_SSE <- function(subject_id, omega1_vec, omega2_vec){
+  # Filter the subjects data from the entire normalized dataframe
+  subject_x_data <- data_normalized %>% 
+    filter(Subject == subject_id, Accuracy == 1)
+  
+  # print("Length of omega2_vec")
+  # print(omega2_vec)
+  # print(length(omega2_vec))
+  # print("Length of omega1_vec")
+  # print(omega1_vec)
+  # print(length(omega1_vec))
+  
+  
+  # List for squared errors
+  squared_errors = c()
+  
+  trials <- unique(subject_x_data$Trial)
+  for (trial_no in trials) {
+    trial_x_data <- subject_x_data %>% filter(Trial == trial_no)
+    
+    tx_display = trial_x_data$Display[1]
+    tx_sequence_str <- trial_x_data$Sequence[1] 
+    tx_beads <- as.numeric(unlist(strsplit(tx_sequence_str, ",")))
+    tx_hidden_color <- trial_x_data$HiddenColor[1]
+    tx_observed <- trial_x_data$ProbEstimate
+    tx_ratio_val <- trial_x_data$Ratio[1]
+    tx_bead_ratio <- if (tx_ratio_val == 60) c(majority = 0.6, minority = 0.4) else c(majority = 0.9, minority = 0.1)
+    
+    # Choose omega1 and omega2 based on the chosen model (M11, M12, M22 or M24), and thus according to the trial's Ratio and Display
+    omega1 <- ifelse(
+      length(omega1_vec) == 1, # (if)
+      omega1_vec["omega1"], # (then)
+      ifelse(               # (else)
+        tx_display == TRUE,
+        omega1_vec["omega1_DTrue"],
+        omega1_vec["omega1_DFalse"]
+      )
+    )
+    
+    omega2 = ifelse(
+        length(omega2_vec) == 1, # Model M11 
+        omega2_vec["omega2"],
+        ifelse(
+          length(omega2_vec) == 2, # (if) Model M12 
+          ifelse( # (then)
+            tx_ratio_val == 60,
+            omega2_vec["omega2_60"],
+            omega2_vec["omega2_90"]
+          ),
+          case_when( # (else) Model M24
+            (tx_ratio_val == 60 & tx_display == TRUE) ~ omega2_vec["omega2_60_DTrue"],
+            (tx_ratio_val == 60 & tx_display == FALSE) ~ omega2_vec["omega2_60_DFalse"],
+            (tx_ratio_val == 90 & tx_display == TRUE) ~ omega2_vec["omega2_90_DTrue"],
+            (tx_ratio_val == 90 & tx_display == FALSE) ~ omega2_vec["omega2_90_DFalse"],
+            TRUE ~ NA
+          )
+        ))
+    
+    # print("Trial info:")
+    # print(trial_no)
+    # print(tx_display)
+    # print(tx_ratio_val)
+    # print("Omega1 and omega2:")
+    # print(omega1)
+    # print(omega2)
+    
+    
+    tx_predicted <- simulate_beliefs(
+      beads = tx_beads, 
+      majority_color = tx_hidden_color, 
+      bead_ratio = tx_bead_ratio, 
+      subject_prior = tx_observed[1], 
+      omega1 = omega1, 
+      omega2 = omega2
+      )
+    
+    # Compute the squared error for the trial
+    SE = (tx_predicted[2:9] - tx_observed[2:9])^2
+    squared_errors <- append(squared_errors, SE)
+  }
+  
+  # Sum the squared errors for all estimates for all trials
+  SSE <- sum(squared_errors)
+  return(SSE)
+}
+
+```
+
+```{r}
+# We wish to define the BIC-function such that 
+
+compute_BIC <- function(subject_id) {
+  # SSE: Sum of squared errors (for some participant and their model)
+  # k: number of free parameters (2 for 1ω1,1ω2; 3 for 1ω1,2ω2)
+  # m_per_trial: number of probability estimates per trial (8, not counting the prior)
+  
+  subject_modelling_data <- modelling_results %>% filter(Subject == as.integer(subject_id))
+  m_per_trial = 8
+  n <- 64 * m_per_trial
+  
+  params_M11 <- c(
+    omega1 = mean(subject_modelling_data$omega1),
+    omega2 = mean(subject_modelling_data$omega2)
+    )
+  
+  params_M12 <- c(
+    omega1 = mean(subject_modelling_data$omega1),
+    omega2_60 = subject_modelling_data %>% filter(Ratio == 60) %>% pull(omega2) %>% mean(),
+    omega2_90 = subject_modelling_data %>% filter(Ratio == 90) %>% pull(omega2) %>% mean()
+  )
+  
+  params_M22 <- c(
+    omega1_DTrue = subject_modelling_data %>% filter(Display == TRUE) %>% pull(omega1) %>% mean(),
+    omega1_DFalse = subject_modelling_data %>% filter(Display == FALSE) %>% pull(omega1) %>% mean(),
+    omega2_60 = subject_modelling_data %>% filter(Ratio == 60) %>% pull(omega2) %>% mean(),
+    omega2_90 = subject_modelling_data %>% filter(Ratio == 90) %>% pull(omega2) %>% mean()
+  )
+  
+  params_M24 <- c(
+    omega1_DTrue = subject_modelling_data %>% filter(Display == TRUE) %>% pull(omega1) %>% mean(),
+    omega1_DFalse = subject_modelling_data %>% filter(Display == FALSE) %>% pull(omega1) %>% mean(),
+    omega2_60_DTrue = subject_modelling_data %>% filter(Ratio == 60 & Display == TRUE) %>% pull(omega2) %>% mean(),
+    omega2_60_DFalse = subject_modelling_data %>% filter(Ratio == 60 & Display == FALSE) %>% pull(omega2) %>% mean(),
+    omega2_90_DTrue = subject_modelling_data %>% filter(Ratio == 90 & Display == TRUE) %>% pull(omega2) %>% mean(),
+    omega2_90_DFalse = subject_modelling_data %>% filter(Ratio == 90 & Display == FALSE) %>% pull(omega2) %>% mean()
+  )
+  
+  # Compute the SSE individually for each model
+  SSE_M11 <- compute_SSE(
+    subject_id, 
+    omega1_vec = params_M11[c("omega1")], 
+    omega2_vec = params_M11[c("omega2")]
+    )
+  
+  SSE_M12 <-  compute_SSE(
+    subject_id, 
+    omega1_vec = params_M12[c("omega1")], 
+    omega2_vec = params_M12[c("omega2_60","omega2_90")]
+    )
+  
+  SSE_M22 <- compute_SSE(
+    subject_id,
+    omega1_vec = params_M22[c("omega1_DTrue","omega1_DFalse")],
+    omega2_vec = params_M22[c("omega2_60","omega2_90")]
+  )
+
+  SSE_M24 <- compute_SSE(
+    subject_id,
+    omega1_vec = params_M24[c("omega1_DTrue","omega1_DFalse")],
+    omega2_vec = params_M24[c("omega2_60_DTrue", "omega2_60_DFalse","omega2_90_DTrue", "omega2_90_DFalse")]
+  )
+  
+  
+  # BIC formula
+  BIC_M11 <- n * log(SSE_M11 / n) + 2 * log(n)
+  BIC_M12 <- n * log(SSE_M12 / n) + 3 * log(n)
+  BIC_M22 <- n * log(SSE_M22 / n) + 4 * log(n)
+  BIC_M24 <- n * log(SSE_M24 / n) + 6 * log(n)
+  
+  model_BICs <- data.frame(
+    M11 = BIC_M11,
+    M12 = BIC_M12,
+    M22 = BIC_M22,
+    M24 = BIC_M24,
+    row.names = subject_id
+  )
+  return(model_BICs)
+}
+
+```
+
+```{r}
+subject_ids <- data_normalized %>% distinct(Subject) %>% pull(Subject)
+
+BICs_list <- lapply(subject_ids, compute_BIC)
+BIC_df <- do.call(rbind, BICs_list)
+
+```
+
+```{r}
+BIC_df %>% 
+  summarise(
+    Mean_BIC_M11 = mean(M11),
+    Mean_BIC_M12 = mean(M12),
+    Mean_BIC_M22 = mean(M22),
+    Mean_BIC_M24 = mean(M24)
+  ) 
+```
+
+It may be assessed that model M12 is the best fitting model. We can now determine the value of the parameters omega1, omega2_60 and omega2_90 for the group-level best fitting model:
+
+```{r}
+group_omega1 <- filtered_modelling_results %>% pull(omega1) %>% mean()
+group_omega2_60 <- filtered_modelling_results %>% filter(Ratio == 60) %>% pull(omega2) %>% mean()
+group_omega2_90 <- filtered_modelling_results %>% filter(Ratio == 90) %>% pull(omega2) %>% mean()
+
+print("Group omega1")
+print(group_omega1)
+print("Group omega2_60")
+print(group_omega2_60)
+print("Group omega2_90")
+print(group_omega2_90)
+
+```
+
+## Plotting Model Predictions against Participant Data
+
+What's left to do now is plot the model predictions against observed probability estimate in the two descriptive plots in "Preprocessing and descriptive plots.Rmd". We may go about this in two ways
+
+1.  Use the group-level parameters from the best model (specifically, $\omega_1\approx1.04$, $\omega_{2(60)}\approx0.62$ and $\omega_{2(90)}\approx0.28$), and have the model with these specifications simulate belief trajectories for each of the 64 trials. Essentially, the group-level model 'runs' the experiment, and we get a data frame, with a similar structure to that of a participant, but with predictions, rather than actual observations. This data can be plotted just like we did with all the participants' data, except we don't average across the participants.
+2.  Alternatively, we take a similar approach to the one above, but use the estimated **participant-level** parameters instead, when computing model-predictions. In this case we use each participant's unique model parameters to simulate belief trajectories, supposedly leading to a smaller deviation between the model simulations and the observed data.
+
+While we're certainly interested in the group-level parameters and their respective distributions, we decide to go with approach (2), since it seems more plausible that there would be some variation in each participant's parameters (some are perhaps more prone to base-rate neglect than others, people may weigh the likelihood differently, etc.)
+
+**How to achieve this? —\>** we add a prediction column to the *data_normalized* data frame, then produce predictions for each participant using **their respective** omega1 and omega2s (\_60 and \_90), and then plot using those data.
+
+```{r}
+# create a copy of the data_normalized dataframe, add a column for omega1s and omega2s, and finally produce the column with the model predictions
+
+subject_omegas <- modelling_results %>%
+  group_by(Subject, Ratio) %>%
+  summarise(
+    omega1 = mean(omega1),
+    omega2 = mean(omega2),
+    .groups = "drop"
+  ) %>% group_by(Subject) %>% 
+  group_modify(function(subject_df, subject_key) {
+    mean_omega1 <- subject_df$omega1 %>% mean()
+    subject_df$omega1 <- rep(x = mean_omega1, each = 2)
+    
+    return(subject_df)
+  })
+
+# Reformat subject column
+subject_omegas <- subject_omegas %>% mutate(Subject = sprintf("%03d", Subject))
+
+
+# Add the parameter columns, showing the parameters for each participant and make predictions
+data_normalized_WithPredictions <- data_normalized %>%
+  left_join(subject_omegas, by = c("Subject", "Ratio")) %>% # This adds a column containing the omega1s and a column containing the omega2s, for each participant
+  mutate(PredEstimate = ProbEstimate) %>% # Use the ProbEstimate column values as placeholder values for now
+  group_by(Subject, Trial) %>% # Consider each trial separately (i.e. pick out a subset of the entire dataframe corresponding to a single trial)
+  group_modify(function(trial_df, trial_key) {
+    subj_id <- trial_key$Subject
+    
+    tx_sequence_str <- trial_df$Sequence[1]
+    tx_beads <- as.numeric(unlist(strsplit(tx_sequence_str, ",")))
+    tx_hidden_color <- trial_df$HiddenColor[1]
+    tx_ratio_val <- trial_df$Ratio[1]
+    tx_observed <- trial_df$ProbEstimate   # vector length 9
+
+    tx_bead_ratio <- if (tx_ratio_val == 60)
+      c(majority = 0.6, minority = 0.4)
+    else
+      c(majority = 0.9, minority = 0.1)
+
+    # Extract the subject's modelling parameters from the 'modelling_results'-dataframe
+
+    subj_omega1 <- trial_df$omega1[1]
+    subj_omega2 <- trial_df$omega2[1]
+
+   # Simulate the belief trajectory for the trial
+    prediction_vec <- simulate_beliefs(
+      beads = tx_beads,
+      majority_color = tx_hidden_color,
+      bead_ratio = tx_bead_ratio,
+      subject_prior = tx_observed[1],
+      omega1 = subj_omega1,
+      omega2 = subj_omega2
+    )
+
+    # Replace ProbEstimate column with prediction_vec
+    trial_df$PredEstimate <- prediction_vec
+
+    return(trial_df)
+  }) %>%
+  ungroup()
+
+```
+
+### Plot 1: Mean (predicted and observed) estimates as a function of bead draw
+
+```{r}
+
+# Data to be plotted:
+plot_model_data <- data_normalized_WithPredictions %>%
+  group_by(Ratio, BeadPosition) %>%
+  summarise(
+    mean_pred = mean(PredEstimate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+plot_observed_data <- data_normalized_WithPredictions %>%
+  group_by(Ratio, BeadPosition) %>%
+  summarise(
+    mean_prob = mean(ProbEstimate, na.rm = TRUE),
+    sd_prob = sd(ProbEstimate, na.rm = TRUE),
+    n = n(),
+    se_prob = sd_prob / sqrt(n),
+    .groups = "drop"
+  )
+
+# Prepare combined plot
+p_model <- ggplot() +
+  # --- MODEL PREDICTIONS: lines only ---
+  geom_line(
+    data = plot_model_data,
+    aes(x = BeadPosition, y = mean_pred, color = as.factor(Ratio)),
+    linewidth = 1
+  ) +
+  # --- ACTUAL ESTIMATES: error bars ---
+  geom_errorbar(
+    data = plot_observed_data,
+    aes(
+      x = BeadPosition,
+      ymin = mean_prob - se_prob,
+      ymax = mean_prob + se_prob,
+      color = as.factor(Ratio)
+    ),
+    width = 0.15,
+    alpha = 0.8
+  ) +
+  # --- ACTUAL ESTIMATES: points only ---
+  geom_point(
+    data = plot_observed_data,
+    aes(x = BeadPosition, y = mean_prob, color = as.factor(Ratio)),
+    size = 2,
+    alpha = 0.9,
+    show.legend = TRUE
+  ) +
+  
+  geom_text( # Remove this to remove point estimate-labels.
+    data = plot_observed_data,
+    aes(
+      x = BeadPosition, 
+      y = mean_prob, 
+      color = as.factor(Ratio), 
+      label = round(mean_prob, 2)), 
+    vjust = 2.5, 
+    size = 2.0, 
+    show.legend = FALSE
+    ) + 
+  
+  scale_x_continuous(breaks = 0:8) +
+  scale_color_brewer(palette = "Dark2") +
+  
+  theme_classic(base_size = 11) +
+  labs(
+    x = "Bead Position",
+    y = "Mean Probability Estimate",
+    color = "Ratio",
+    title = "Model Predictions (lines) and Actual Estimates (dots)"
+  )
+
+p_model
+
+
+```
+
+```{r}
+# Save relevant plots from above as PNG's
+ggsave(
+  filename = here("figs", "meanprob_by_beadpos_predictions.png"),
+  p_model,
+  width = 6,
+  height = 4,
+  dpi = 300,
+  units = "in",
+  #bg = "white"
+)
+```
+
+### Plot 2: Final Estimate Difference (predicted and observed) as a function of Absolute Evidence Asymmetry (both Display types included)
+
+```{r}
+predicted_difference_data <- data_normalized_WithPredictions %>% filter(BeadPosition == 8 & Display == TRUE) %>% 
+  mutate(loading = case_when(
+    EvidenceAsymmetry < 0 ~ 'front',
+    EvidenceAsymmetry > 0 ~ 'back',
+    TRUE ~NA
+  )) %>% mutate(EvidenceAsymmetry = abs(EvidenceAsymmetry)) %>%
+  
+  filter(!is.na(loading)) %>% 
+  
+  group_by(Ratio, Subject, EvidenceAsymmetry) %>% 
+  summarise(BackFront_Diff = PredEstimate[loading == 'back'] - PredEstimate[loading == 'front'])
+
+
+plot_predicted_difference_data <- predicted_difference_data %>%
+  group_by(Ratio, EvidenceAsymmetry) %>%
+  summarise(
+    mean_diff = mean(BackFront_Diff, na.rm = TRUE),
+    sd_diff = sd(BackFront_Diff, na.rm = TRUE),
+    n = n(),
+    se_diff = sd_diff / sqrt(n)
+  )
+
+# Save the plot as a plottable object (so it can be saved as PNG)
+p_predicted_difference <- ggplot(plot_predicted_difference_data, aes(x = EvidenceAsymmetry, y = mean_diff, color = as.factor(Ratio))) +
+  geom_point(size = 2) +
+  #geom_errorbar(aes(ymin = mean_diff - se_diff, ymax = mean_diff + se_diff), width = 0.1, alpha = 0.4) +
+  scale_x_continuous(breaks = c(0.5, 1.5, 3.5, 4.5, 6.0, 6.5, 7.5)) +
+  scale_color_brewer(palette = "Dark2") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    x = "Evidence Asymmetry",
+    y = "PREDICTED Final Estimate Difference \n (Backloaded - Frontloaded)",
+    color = "Ratio",
+    title = "PREDICTED Final Estimate Difference \n across Evidence Asymmetry and Ratio "
+  )
+
+```
+
+The entire evidence asymmetry data
+
+```{r}
+pred_df <- plot_predicted_difference_data %>%
+  rename(diff = mean_diff) %>%
+  mutate(type = "predicted") 
+
+actual_df <- plot_difference_data %>%
+  rename(diff = mean_diff) %>%
+  mutate(type = "actual")
+
+
+combined_difference_df <- bind_rows(pred_df, actual_df)
+
+p_combined_difference <- ggplot(combined_difference_df, 
+                     aes(x = EvidenceAsymmetry, y = diff, 
+                         color = as.factor(Ratio))) +
+
+  # ---- Predicted values: LINE ONLY ----
+  geom_line(data = ~ filter(.x, type == "predicted"),
+            linewidth = 1, alpha = 0.8) +
+
+  # ---- Actual values: POINTS + ERROR BARS ----
+  geom_point(data = ~ filter(.x, type == "actual"),
+             size = 2) +
+  geom_errorbar(data = ~ filter(.x, type == "actual"),
+                aes(ymin = diff - se_diff, ymax = diff + se_diff),
+                width = 0.1, alpha = 0.4) +
+
+  # Background and styling
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  scale_x_continuous(breaks = c(0.5, 1.5, 3.5, 4.5, 6.0, 6.5, 7.5)) +
+  scale_color_brewer(palette = "Set1") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  ) +
+  labs(
+    x = "Absolute Evidence Asymmetry",
+    y = "FED \n (Backloaded - Frontloaded)",
+    color = "Ratio",
+    title = "Model Predictions (lines) and Actual FED's (dots)"
+  )
+
+p_combined_difference
+```
+
+```{r}
+# Save relevant plots from above as PNG's
+ggsave(
+  filename = here("figs", "meanFED_by_absEA_predictions.png"),
+  p_combined_difference,
+  width = 6,
+  height = 4,
+  dpi = 300,
+  units = "in",
+  #bg = "white"
+)
+```

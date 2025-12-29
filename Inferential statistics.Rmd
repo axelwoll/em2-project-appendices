@@ -1,0 +1,235 @@
+---
+title: "Real Analysis"
+author: "Siri Sant"
+date: "2025-12-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load libraries:
+
+```{r}
+# Load all packages from the library (NOTE: the list of required packages is defined in "Preprocessing and descriptive plots.Rmd"!)
+lapply(required_packages, library, character.only = TRUE)
+```
+
+# Inferential Statistics
+
+In this R-Markdown file, we preprocess data and carry out our statistical analyses of the data.
+
+## Pre-processing of data files
+
+(OBS: the pre-processing in this file is exactly the same as in "Preprocessing and descriptive plots.Rmd", as these two R-Markdown files were originally independent)
+
+```{r}
+# A list containing the names of the files in the folder '../EM2/Participant data'
+data_filenames = dir(path = here("participant data/"), pattern = '.csv')
+
+data_foldername = "./participant data/"
+
+# Append the folder name to the file name to get the relative paths (relative to WD) to the data files
+
+for (filename_idx in 1:length(data_filenames)) {
+  filename <- data_filenames[filename_idx]
+  data_filenames[filename_idx] <- paste(data_foldername, 
+                                        filename, 
+                                        sep = ""
+                                        )
+}
+
+raw_data <- read_delim(data_filenames)
+raw_data <- raw_data %>%
+  mutate(Subject = str_extract(Subject, "\\d+")) # remove the f in "006f"
+```
+
+```{r}
+data_normalized <- data.frame(raw_data)
+
+# Normalize the values
+data_normalized <- data_normalized %>%
+  filter(Accuracy==1) %>% #Only correct trials
+  mutate(
+  ProbEstimate = ifelse(HiddenColor == 'green',
+                        1-ProbEstimate, 
+                        ProbEstimate)
+  )
+```
+
+## Manipulation Check
+
+Effects of BeadPosition and Ratio on Mean Probability Estimate Across Display conditions.
+
+Create relevant Dataframe:
+
+```{r}
+mc_data <- data_normalized %>%
+  group_by(Subject, Ratio, BeadPosition, Display) %>%
+  summarise(meanProb = mean(ProbEstimate, na.rm = TRUE), .groups = "drop")
+
+#Ratio is a Factor and Bead Position is continuous
+mc_data <- mc_data %>%
+  mutate(
+  Ratio = factor(Ratio)
+  )
+```
+
+Create Bayesian Linear Mixed Model:
+
+```{r}
+# With interaction
+LM_MC <- brm(meanProb ~ Ratio * BeadPosition + (1|Subject), data=mc_data, backend = "cmdstanr", chains = 4, cores = 4, iter = 4000, save_pars = save_pars(all = TRUE))
+
+#Without interaction
+LM_MC_main <- brm(meanProb ~ Ratio + BeadPosition + (1 | Subject),
+                 data = mc_data, backend = "cmdstanr",
+                 chains = 4, cores = 4, iter = 4000, save_pars = save_pars(all = TRUE))
+
+summary(LM_MC)
+
+# Compare and compute BayesFactor - is the interaction nescessary?
+BF_MC <- bayesfactor_models(LM_MC_main,LM_MC)
+print(BF_MC)
+# Interaction effect model is better than main effect model (BF = 2.16e+45)
+```
+
+Exploratory: Does including Display help predict Mean Probability Estimate?
+
+```{r}
+# With Display
+# LM_MC_Display <- brm(meanProb ~ Ratio * BeadPosition * Display + (1 | Subject),
+              #   data = mc_data, backend = "cmdstanr",
+              #   chains = 4, cores = 4, iter = 4000, save_pars = save_pars(all = TRUE))
+
+# summary(LM_MC_Display)
+
+# Compare and compute BayesFactor - is the the three-way interaction nescessary?
+# BF_MC_Display <- bayesfactor_models(LM_MC,LM_MC_Display)
+# print(BF_MC_Display)
+
+# No (BF = 1.17e-08)
+```
+
+## Base Rate Neglect
+
+Effects of Ratio x Absolute Evidence Asymmetry (absEA) on Final Estimate Difference (FED) Across Display.
+
+Create Relevant Dataframe with Front- and Backloaded sequences and compute Final Estimate Difference:
+
+```{r}
+m_data_formats <- data_normalized %>%
+  filter(BeadPosition==8) %>%
+  mutate(
+    LoadType = case_when(
+      EvidenceAsymmetry < 0 ~ "FrontLoaded",
+      EvidenceAsymmetry > 0  ~ "BackLoaded",
+      TRUE ~ "Neutral"
+    ),
+    absEA = abs(EvidenceAsymmetry)
+  ) %>%
+  filter(absEA != 0) %>%
+  group_by(absEA, LoadType, Subject, Ratio, Display) %>%
+  summarise(meanProb = mean(ProbEstimate, na.rm = TRUE),.groups = "drop") %>%
+  pivot_wider(
+    names_from = LoadType,
+    values_from = meanProb
+  ) %>%
+  mutate(FED = BackLoaded - FrontLoaded)
+
+m_data_formats <- m_data_formats %>% #removes N/A
+  filter(!is.na(FrontLoaded), !is.na(BackLoaded))
+
+m_data_formats <- m_data_formats %>%
+  mutate(,
+    Ratio = factor(Ratio),
+    Display = factor(Display)
+  )
+
+```
+
+Test for Recency Bias (FED\>0) with one-sided Bayesian t-test:
+
+```{r}
+ttestBF(
+  x = m_data_formats$FED,
+  mu = 0,
+  nullInterval = c(-Inf, 0)
+
+)
+# BF  = 0.058 (strong evidence for the null hypothesis FED =< 0)
+
+```
+
+Bayesian LMM (with random slopes as in Ashinoff's paper) of the Effect of Ratio x Absolute Evidence Asymmetry on Final Estimate Difference.
+
+```{r}
+# Full interaction model
+LM_FED <- brm(FED ~ absEA * Ratio + (1 + absEA | Subject), data = m_data_formats, iter = 4000, chains = 4, cores=4, backend = "cmdstanr",save_pars = save_pars(all = TRUE))
+
+# With interaction but only with Main Effect of absEA
+#LM_FED_absEA <- brm(FED ~ absEA:Ratio + absEA + (1 + absEA | Subject), data = m_data_formats, iter = 4000, chains = 4, cores=4, backend = "cmdstanr",save_pars = save_pars(all = TRUE))
+
+# Without interaction. Full Main Effects Model.
+LM_FED_main <- brm(FED ~ absEA + Ratio + (1 + absEA | Subject), data = m_data_formats, iter = 4000, chains = 4, cores=4, backend = "cmdstanr", save_pars = save_pars(all = TRUE))
+
+# Without interaction. Only Main Effect of absEA (not Ratio).
+#LM_FED_main_absEA <- brm(FED ~ absEA + (1 + absEA | Subject), data = m_data_formats, iter = 4000, chains = 4, cores=4, backend = "cmdstanr", save_pars = save_pars(all = TRUE))
+
+# Compare Full Interaction Model with Full Main Effects Model
+BF_FED <- bayesfactor_models(LM_FED_main,LM_FED)
+print(BF_FED)
+
+# Compare Interaction Model (only absEA Main Effect) with Main Effect of absEA
+# BF_FED_absEA <- bayesfactor_models(LM_FED_main_absEA,LM_FED_absEA)
+# print(BF_FED_absEA)
+```
+
+We use the Full Interaction Model. No interaction effect (BF = 0.008, denominator = absEA + Ratio (1 + absEA \| Subject)).
+
+Is the Main Effects Model better?
+
+```{r}
+# The Null Model (only Subject)
+null_model <- brm(FED ~ (1 + absEA | Subject),
+                  data = m_data_formats, backend = "cmdstanr", chains = 4, cores = 4, save_pars = save_pars(all = TRUE), iter = 4000)
+
+# Compare with Main Effect Model
+BF_FED_main <- bayesfactor_models(null_model,LM_FED_main)
+print(BF_FED_main)
+
+# Compare with Main Effect Model of absEA
+# BF_FED_main_absEA <- bayesfactor_models(null_model,LM_FED_main_absEA)
+# print(BF_FED_main_absEA)
+```
+
+No Main Effects either when compared with Intercept only + random effects for Subjects (BF = 0.0007).
+
+## Effects of Format on Base Rate Neglect
+
+Originally, we had planned a three-factor Bayesian LMM to examine how Format/Display influenced the Final Estimate Difference, with the expectation of:
+
+1.  An interaction between Ratio × absEA, reflecting base rate neglect (i.e., underweighting of the prior), and
+
+2.  A three-way interaction (Ratio × absEA × Display), hypothesizing stronger base rate neglect in the Percentage Format compared to the Natural Frequency Format.
+
+```{r}
+# Three-way (absEA x Ratio x Format) Interaction Model
+LM_format <- brm(FED ~ absEA * Display * Ratio + (1 + absEA | Subject),
+                  data = m_data_formats, backend = "cmdstanr", chains = 4, cores = 4, save_pars = save_pars(all = TRUE), iter = 4000)
+
+# Main Effects Model
+LM_format_main <- brm(FED ~ absEA + Display + Ratio + (1 + absEA | Subject),
+                  data = m_data_formats, backend = "cmdstanr", chains = 4, cores = 4, save_pars = save_pars(all = TRUE), iter = 4000)
+
+# Compare Interaction Model with Main Effect Model
+BF_format <- bayesfactor_models(LM_format_main,LM_format)
+print(BF_format)
+# Evidence against the three-way interaction (BF = 7.55e-07)
+
+# Compare Main Effects Model with the Null Model (including Display as predictor)
+BF_format_null <- bayesfactor_models(null_model, LM_format_main)
+print(BF_format_null)
+# Evidence against Main Effect Model (BF = 1.50e-05)
+```

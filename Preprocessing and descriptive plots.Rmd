@@ -1,0 +1,421 @@
+---
+title: "bla"
+author: "Andreas Akselvoll"
+date: "2025-11-05"
+output: pdf_document
+---
+
+```{r include=FALSE}
+# Required packages in the 'package'-library
+required_packages <- c(
+  "tidyverse", 
+  "rstatix", 
+  "psych", 
+  "patchwork", 
+  "here", 
+  "lme4", 
+  "tidyr", 
+  "dplyr", 
+  "lmerTest",
+  "BayesFactor",
+  "brms",
+  "tidybayes",
+  "ggplot2",
+  "bayestestR",
+  "parallel", 
+  "foreach", 
+  "doParallel", 
+  "progressr", 
+  "report"
+  )
+
+# Install any missing packages
+installed <- required_packages %in% rownames(installed.packages())
+if(any(!installed)) install.packages(required_packages[!installed])
+
+# Load all packages from the library
+lapply(required_packages, library, character.only = TRUE)
+```
+
+```{r}
+# Citations for packages
+lapply(required_packages, citation)
+```
+
+# Pre-processing and descriptive plots
+
+In this R-Markdown file, we load the raw data from our experiment, pre-process it, and then produce the descriptive plots to be used in Results section of our report.
+
+## Pre-processing of the data files
+
+```{r}
+# A list containing the names of the files in the folder '../EM2/Participant data'
+data_filenames = dir(path = here("participant data/"), pattern = '.csv')
+
+data_foldername = "./participant data/"
+
+# Append the folder name to the file name to get the relative paths (relative to WD) to the data files
+
+for (filename_idx in 1:length(data_filenames)) {
+  filename <- data_filenames[filename_idx]
+  data_filenames[filename_idx] <- paste(data_foldername, 
+                                        filename, 
+                                        sep = ""
+                                        )
+}
+
+raw_data <- read_delim(data_filenames)
+```
+
+## Mean probability estimates as a function of bead position
+
+```{r}
+# Copy of the raw_data frame (to preserve to original dataframe), which has normalized the values in the ProbEstimate column, such that the reflect an estimate relating to the hidden box.
+data_normalized <- data.frame(raw_data)
+
+# Normalize the values
+data_normalized <- data_normalized %>% mutate(
+  ProbEstimate = ifelse(HiddenColor == 'green',
+                        1-ProbEstimate, 
+                        ProbEstimate)
+  )
+
+# Data to be plotted:
+plot_normalized_data <- data_normalized %>%
+  group_by(Ratio, BeadPosition) %>%
+  summarise(
+    mean_prob = mean(ProbEstimate, na.rm = TRUE),
+    sd_prob = sd(ProbEstimate, na.rm = TRUE),
+    n = n(),
+    se_prob = sd_prob / sqrt(n)
+  )
+
+# Plot via ggplot
+p_main <- ggplot(plot_normalized_data, aes(x = BeadPosition, y = mean_prob, color = as.factor(Ratio))) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = mean_prob - se_prob, ymax = mean_prob + se_prob), width = 0.1, alpha = 0.4) + # alpha = opacity (40% visible)
+  geom_text(aes(label = round(mean_prob, 2)), vjust = -2.0, size = 2.0, show.legend = FALSE) + # Remove this to remove point estimate-labels.
+  scale_x_continuous(breaks = 0:8) +
+  scale_color_brewer(palette = "Dark2") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  ) +
+  labs(
+    x = "Bead Position",
+    y = "Mean Probability Estimate",
+    color = "Ratio",
+    title = "Probability Estimates Update Toward Correct Box"
+  )
+
+p_main
+
+```
+
+```{r}
+# Save relevant plots from above as PNG's
+ggsave(
+  filename = here("figs", "Figure3A_replication_1.png"),
+  p_main,
+  width = 6,
+  height = 4,
+  dpi = 300,
+  units = "in"
+)
+```
+
+**Comments relating to the code block above**:
+
+1.  scale_color_brewer(palette = "(x)"): set of perceptually balanced color palettes designed for data visualization (other options: "Set1", "Paired")
+
+**Comments relating to the plot**
+
+The plot above shows group mean of average probability estimates over bead draws (0-8) for each bead-ratio condition (60, 90). Note that the averages are taken across the two display conditions, and thus hides any differences there might be in belief updating certainty between different displays - this is on purpose though, and two plots identical to the one above will be made in a moment (one for each display condition). Comparing the display conditions at this stage is not of interest though.
+
+Note that the lines in the plot above are *simply lines connecting the dots* while in Ashinoffs Fig 3a, "(...) Solid lines and shaded regions reflect the mean and standard error of the mean (SEM) of the weighted Bayesian model fits across participants.
+
+Note also that the plot above doesn't include the 'insets' shown in Ashinoffs Fig. 3a ("The inset shows the same data limited to matched (identical) sequences for the 60:40 and 90:10 conditions.")
+
+Plan 2: Create the inset shows the same data limited to matched (identical) sequences for the 60:40 and 90:10 conditions.
+
+What this means is, that some part of the difference between the updating patterns for the 60, 90 ratios respectively, could be attributable to those conditions having distinct sequences, which are not shared by those ratios - however, some of the sequences appear in both ratio conditions (the 'matched / identical sequences). The data used for the inset is thus a subset of the entire column of ProbEstimates, where the distinct sequences have been filtered out – **effectively** the reflects the *isolated* effect of ratio *given identical evidence*.
+
+```{r}
+# Determine the matched (identical) sequences, i.e those appearing in both ratio conditions
+matched_seqs <- data_normalized %>%
+  group_by(Sequence) %>%
+  summarise(n_ratios = n_distinct(Ratio)) %>% 
+  filter(n_ratios > 1) %>% 
+  pull(Sequence)
+
+# Filter out trials where the shown sequence was unique to the ratio in that trial
+matched_data <- data_normalized %>%
+  filter(Sequence %in% matched_seqs)
+
+# Data to be plotted
+plot_matched_data <- matched_data %>%
+  group_by(Ratio, BeadPosition) %>%
+  summarise(
+    mean_prob = mean(ProbEstimate, na.rm = TRUE),
+    sd_prob = sd(ProbEstimate, na.rm = TRUE),
+    n = n(),
+    se_prob = sd_prob / sqrt(n)
+  )
+
+# Plot via ggplot
+p_matched <- ggplot(plot_matched_data, aes(x = BeadPosition, y = mean_prob, color = as.factor(Ratio))) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = mean_prob - se_prob, ymax = mean_prob + se_prob), width = 0.1, alpha = 0.4) + # alpha = opacity (40% visible)
+  geom_text(aes(label = round(mean_prob, 2)), vjust = -2.0, size = 2.0, show.legend = FALSE) + # Remove this to remove point estimate-labels.
+  scale_x_continuous(breaks = 0:8) +
+  scale_color_brewer(palette = "Dark2") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  ) +
+  labs(
+    x = "Bead Position",
+    y = "Mean Probability Estimate",
+    color = "Ratio",
+    title = "Probability Estimates Update Toward Correct Box \n (Matched Sequences)"
+  )
+
+p_matched
+
+```
+
+```{r}
+# Save relevant plots from above as PNG's
+ggsave(
+  filename = here("figs", "Figure3A_replication_2.png"),
+  p_matched,
+  width = 6,
+  height = 4,
+  dpi = 300,
+  units = "in"
+)
+```
+
+**Comments relating to the code block above**:
+
+Regarding the determination of the identical sequences (matches)
+
+1.  group_by(Sequence): groups the entire normalized dataset into groups, defined by a unique sequence (16 unique sequences total)
+2.  summarise(n_ratios = n_distinct(Ratio)): creates a new dataframe showing for each distinct sequence, the number of ratios (1 or 2) containing that sequence
+3.  modify that dataframe by filtering out those sequences appearing in only one ratio condition, leaving only the matched ones.
+4.  Extract the matched sequences (in the one column) as a vector.
+
+## Final estimate difference as a function of evidence asymmetry
+
+A plot for the Visual Record Display:
+
+```{r}
+# Recreation of Ashinoffs Fig 3b (% the model predictions which form the socalled evidence asymmetry slope) for the display condition with the visual record of beads (display == TRUE)
+
+
+# Step 1: make a subset of the normalized data containing only rows for the 8'th bead draw in the display == TRUE condition AND make column labeling values of EvidenceAsymmetry which refer to the loading (back, front, neutral). Also filter away those rows with symmetrical sequences.
+estimatedifference_data_DTrue <- data_normalized %>% filter(Display == TRUE & 
+                                 BeadPosition == 8
+                                 ) %>% 
+  mutate(loading = case_when(
+    EvidenceAsymmetry < 0 ~ 'front',
+    EvidenceAsymmetry > 0 ~ 'back',
+    TRUE ~NA
+  )) %>% mutate(EvidenceAsymmetry = abs(EvidenceAsymmetry)) %>%
+  
+  filter(!is.na(loading)) %>% 
+  
+  group_by(Ratio, Subject, EvidenceAsymmetry) %>% 
+  summarise(BackFront_Diff = ProbEstimate[loading == 'back'] - ProbEstimate[loading == 'front'])
+  
+ 
+# Prepare the plottable object, by taking the mean across participants for each ratio condition
+plot_difference_data_DTrue <- estimatedifference_data_DTrue %>%
+  group_by(Ratio, EvidenceAsymmetry) %>%
+  summarise(
+    mean_diff = mean(BackFront_Diff, na.rm = TRUE),
+    sd_diff = sd(BackFront_Diff, na.rm = TRUE),
+    n = n(),
+    se_diff = sd_diff / sqrt(n)
+  )
+
+# Save the plot as a plottable object (so it can be saved as PNG)
+p_difference_DTrue <- ggplot(plot_difference_data_DTrue, aes(x = EvidenceAsymmetry, y = mean_diff, color = as.factor(Ratio))) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = mean_diff - se_diff, ymax = mean_diff + se_diff), width = 0.1, alpha = 0.4) +
+  scale_x_continuous(breaks = c(0.5, 1.5, 3.5, 4.5, 6.0, 6.5, 7.5)) +
+  scale_color_brewer(palette = "Dark2") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    x = "absEA",
+    y = "FED \n (Backloaded - Frontloaded)",
+    color = "Ratio",
+    title = "Final Estimate Difference (FED) as a function \n of Absolute Evidence Asymmetry (absEA) \n for both bead ratios (Visual Record Display) "
+  )
+
+# Review plot in R
+p_difference_DTrue
+
+```
+
+```{r}
+# Save relevant plots from above as PNG's
+ggsave(
+  filename = here("figs", "Figure3B_replication_1.png"),
+  p_difference_DTrue,
+  width = 6,
+  height = 4,
+  dpi = 300,
+  units = "in"
+)
+```
+
+A plot for the Percentage Display:
+
+```{r}
+# Recreation of Ashinoffs Fig 3b (% the model predictions which form the socalled evidence asymmetry slope) for the display condition with the percentage format display (display == FALSE)
+
+# Step 1: make a subset of the normalized data containing only rows for the 8'th bead draw in the display == TRUE condition AND make column labeling values of EvidenceAsymmetry which refer to the loading (back, front, neutral). Also filter away those rows with symmetrical sequences.
+estimatedifference_data_DFalse <- data_normalized %>% filter(Display == FALSE & 
+                                 BeadPosition == 8
+                                 ) %>% 
+  mutate(loading = case_when(
+    EvidenceAsymmetry < 0 ~ 'front',
+    EvidenceAsymmetry > 0 ~ 'back',
+    TRUE ~NA
+  )) %>% mutate(EvidenceAsymmetry = abs(EvidenceAsymmetry)) %>%
+  
+  filter(!is.na(loading)) %>% 
+  
+  group_by(Ratio, Subject, EvidenceAsymmetry) %>% 
+  summarise(BackFront_Diff = ProbEstimate[loading == 'back'] - ProbEstimate[loading == 'front'])
+  
+ 
+# Prepare the plottable object, by taking the mean across participants for each ratio condition
+plot_difference_data_DFalse <- estimatedifference_data_DFalse %>%
+  group_by(Ratio, EvidenceAsymmetry) %>%
+  summarise(
+    mean_diff = mean(BackFront_Diff, na.rm = TRUE),
+    sd_diff = sd(BackFront_Diff, na.rm = TRUE),
+    n = n(),
+    se_diff = sd_diff / sqrt(n)
+  )
+
+
+p_difference_DFalse <- ggplot(plot_difference_data_DFalse, aes(x = EvidenceAsymmetry, y = mean_diff, color = as.factor(Ratio))) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = mean_diff - se_diff, ymax = mean_diff + se_diff), width = 0.1, alpha = 0.4) +
+  scale_x_continuous(breaks = c(0.5, 1.5, 3.5, 4.5, 6.0, 6.5, 7.5)) +
+  scale_color_brewer(palette = "Set1") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    x = "absEA",
+    y = "FED \n (Backloaded - Frontloaded)",
+    color = "Ratio",
+    title = "Final Estimate Difference (FED) as a function \n of Absolute Evidence Asymmetry (absEA) \n for both bead ratios (Percentage Display) "
+  )
+
+p_difference_DFalse
+```
+
+```{r}
+# Save relevant plots from above as PNG's
+ggsave(
+  filename = here("figs", "Figure3B_replication_2.png"),
+  p_difference_DFalse,
+  width = 6,
+  height = 4,
+  dpi = 300,
+  units = "in"
+)
+```
+
+A plot for both Display conditions:
+
+```{r}
+# For both displays
+estimatedifference_data <- data_normalized %>% filter(BeadPosition == 8) %>% 
+  mutate(loading = case_when(
+    EvidenceAsymmetry < 0 ~ 'front',
+    EvidenceAsymmetry > 0 ~ 'back',
+    TRUE ~NA
+  )) %>% mutate(EvidenceAsymmetry = abs(EvidenceAsymmetry)) %>%
+  
+  filter(!is.na(loading)) %>% 
+  
+  group_by(Ratio, Subject, EvidenceAsymmetry) %>% 
+  summarise(BackFront_Diff = ProbEstimate[loading == 'back'] - ProbEstimate[loading == 'front'])
+  
+ 
+# Prepare the plottable object, by taking the mean across participants for each ratio condition
+plot_difference_data <- estimatedifference_data %>%
+  group_by(Ratio, EvidenceAsymmetry) %>%
+  summarise(
+    mean_diff = mean(BackFront_Diff, na.rm = TRUE),
+    sd_diff = sd(BackFront_Diff, na.rm = TRUE),
+    n = n(),
+    se_diff = sd_diff / sqrt(n)
+  )
+
+
+p_difference <- ggplot(plot_difference_data, aes(x = EvidenceAsymmetry, y = mean_diff, color = as.factor(Ratio))) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = mean_diff - se_diff, ymax = mean_diff + se_diff), width = 0.1, alpha = 0.4) +
+  scale_x_continuous(breaks = c(0.5, 1.5, 3.5, 4.5, 6.0, 6.5, 7.5)) +
+  scale_color_brewer(palette = "Set1") +
+  theme_classic(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 9),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9)
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  labs(
+    x = "absEA",
+    y = "FED \n (Backloaded - Frontloaded)",
+    color = "Ratio",
+    title = "Final Estimate Difference (FED) as a function \n of Absolute Evidence Asymmetry (absEA) \n for both bead ratios"
+  )
+
+p_difference
+```
+
+```{r}
+# Save relevant plot from above as PNG's
+ggsave(
+  filename = here("figs", "Figure3B_replication_3.png"),
+  p_difference,
+  width = 6,
+  height = 4,
+  dpi = 300,
+  units = "in"
+)
+```
