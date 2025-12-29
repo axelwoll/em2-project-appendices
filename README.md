@@ -10,4 +10,4 @@ analyses and modelling, consists of the following files above:
   <li>modellings_results.csv</li>
 </ol>
 
-To open this R-project, download these files, put them in a folder, and open this folder as an R Project via RStudio.
+To open this R-project, download these files, put them in a folder, and open said folder as an R Project via RStudio. Note that "Preprocessing and descriptive plots.Rmd" has to be run as the first file, in its entirety.
